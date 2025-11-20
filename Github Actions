@@ -1,0 +1,59 @@
+name: CI-CD to EKS via Terraform Infra
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "microservices/app1/**"
+      - ".github/workflows/cicd.yaml"
+      - "k8s-manifests/**"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+      IMAGE_TAG: latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        working-directory: microservices/app1
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+          echo "ECR_URI=$ECR_URI"
+          docker build -t $ECR_URI:${IMAGE_TAG} .
+          docker push $ECR_URI:${IMAGE_TAG}
+          echo "ECR_URI=$ECR_URI" >> $GITHUB_ENV
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+
+      - name: Deploy to EKS
+        run: |
+          # Replace image in deployment with the new ECR URI
+          ECR_URI=${{ env.ECR_URI }}
+          sed -i "s|YOUR_AWS_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/your-repo-name:latest|$ECR_URI:${IMAGE_TAG}|g" k8s-manifests/deployment.yaml
+
+          kubectl apply -f k8s-manifests/namespace.yaml
+          kubectl apply -f k8s-manifests/deployment.yaml
+          kubectl apply -f k8s-manifests/service.yaml
